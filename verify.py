@@ -46,7 +46,7 @@ def verify_links():
 
     cur.execute("""
         SELECT id, url FROM found_documents
-        WHERE link_last_http_code IS NULL
+        WHERE link_http_code IS NULL
     """)
     rows = cur.fetchall()
 
@@ -66,7 +66,7 @@ def verify_links():
             UPDATE found_documents
             SET
                 link_date_accessed = ?,
-                link_last_http_code = ?,
+                link_http_code = ?,
                 link_content_type = ?,
                 link_content_length = ?,
                 link_last_modified = ?,

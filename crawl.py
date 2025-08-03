@@ -10,13 +10,14 @@ import sqlite3
 
 
 # ---- File Paths ----
+ALLOWED_DOMAINS_FILE = "domains_allowed.txt"
+BLOCKED_DOMAINS_FILE = "domains_blocked.txt"
+
 STATE_DIR = "state"
 DB_PATH = os.path.join(STATE_DIR, "found_documents.db")
 BEING_VISITED_FILE = os.path.join(STATE_DIR, "urls_being_visited.txt")
 VISITED_FILE = os.path.join(STATE_DIR, "urls_visited.txt")
-TO_VISIT_FILE = os.path.join(STATE_DIR, "url_to_visit.txt")
-ALLOWED_DOMAINS_FILE = os.path.join(STATE_DIR, "domains_allowed.txt")
-BLOCKED_DOMAINS_FILE = os.path.join(STATE_DIR, "domains_blocked.txt")
+TO_VISIT_FILE = os.path.join(STATE_DIR, "urls_to_visit.txt")
 ERROR_LOG_FILE = os.path.join(STATE_DIR, "errors.log")
 
 
@@ -40,8 +41,6 @@ def ensure_state_environment():
         TO_VISIT_FILE,
         VISITED_FILE,
         BEING_VISITED_FILE,
-        ALLOWED_DOMAINS_FILE,
-        BLOCKED_DOMAINS_FILE,
         ERROR_LOG_FILE,
     ]:
         ensure_file(path)
@@ -55,13 +54,12 @@ def init_db():
         url TEXT  NOT NULL,
         source_url TEXT NOT NULL,
         source_title TEXT,
-        source_author TEXT,
         link_extension TEXT,
         link_text TEXT,
         link_title TEXT,
         link_date_added TEXT DEFAULT (datetime('now')),
         link_date_accessed TEXT,
-        link_last_http_code INTEGER,
+        link_http_code INTEGER,
         link_content_type TEXT,
         link_content_length INTEGER,
         link_last_modified TEXT,
@@ -72,12 +70,8 @@ def init_db():
         doc_file_name TEXT,
         doc_checksum TEXT,
         doc_date_created TEXT,
-        doc_encoding TEXT,
         doc_author TEXT,
         doc_title TEXT,
-        doc_language TEXT,
-        doc_subject TEXT,
-        doc_keywords TEXT,
         doc_producer TEXT,
         doc_page_count INTEGER
       )
@@ -106,16 +100,16 @@ def is_probable_pdf(url):
     query = parse_qs(parsed.query)
     netloc = parsed.netloc.lower()
 
-    # Condition 1: Path ends with .pdf
     if path.endswith(".pdf"):
         return True
 
-    # Condition 2: Path contains 'download' AND query has 'id'
-    # un peu trop souple ; c'est pour les urls cahier-de-prepa
     if "download" in path and "id" in query:
         return True
+    if "plmbox.math.cnrs.fr/f/" in url and "dl" in query:
+        return True
+    if "plmbox.math.cnrs.fr/seafhttp/f/" in url:
+        return True
 
-    # Condition 3: google drive
     if netloc == "drive.google.com":
         parts = path.split('/')
         if len(parts) >= 5 and parts[1] == 'file' and parts[2] == 'd':
@@ -146,15 +140,6 @@ def is_probable_html(url):
 
     return False
 
-def should_visit(full_url, visited, allowed_domains,blocked_domains):
-    normalized = normalize_url(full_url)
-    return (
-        normalized.startswith("http") and
-        normalized not in visited and
-        is_allowed_domain(normalized, allowed_domains) and
-        (not is_blocked_domain(normalized, blocked_domains)) and
-        is_probable_html(normalized)
-    )
 
 
 def fetch_with_throttle(url):
@@ -234,8 +219,7 @@ def append_pdf_info_batch(batch, pdf_url, extension, anchor_text, anchor_title, 
         anchor_text,
         anchor_title,
         source_url,
-        source_title,
-        source_author
+        source_title
     ))
 
 def flush_pdf_info_batch(db_conn, batch):
@@ -249,9 +233,8 @@ def flush_pdf_info_batch(db_conn, batch):
         link_text,
         link_title,
         source_url,
-        source_title,
-        source_author
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        source_title
+      ) VALUES (?, ?, ?, ?, ?, ?)
     """
 
     cur = db_conn.cursor()
@@ -288,6 +271,7 @@ def is_blocked_domain(url, blocked_domains):
 
 
 def crawl():
+    added_documents = set()
     pdf_batch = []
     visited = load_set(VISITED_FILE)
     to_visit = load_to_visit(TO_VISIT_FILE)
@@ -322,6 +306,7 @@ def crawl():
 
             if current_url in visited or current_depth > MAX_DEPTH:
                 save_to_visit(to_visit, TO_VISIT_FILE)
+                print("skip: already in visited or max depth")
                 continue
 
             if is_blocked_domain(current_url, blocked_domains):
@@ -346,36 +331,71 @@ def crawl():
                     print(f"Skipping {current_url} due to request failure.")
                     continue
 
+                current_url = normalize_url(res.url)
+                if current_url in visited:
+                    print(f"url {current_url} already visited")
+                    continue
 
                 soup = BeautifulSoup(res.text, "html.parser")
+
+                # Detect meta-refresh redirects
+                meta_refresh = soup.find('meta', attrs={'http-equiv': 'refresh'})
+                if meta_refresh:
+                    content = meta_refresh.get('content', '')
+                    if 'url=' in content.lower():
+                        redirect_url = content.lower().split('url=')[-1].strip()
+                        full_redirect_url = urljoin(current_url, redirect_url)
+                        print(f"Meta-refresh redirect found: {full_redirect_url}")
+                        to_visit.append((normalize_url(full_redirect_url), str(current_depth)))
+                        visited.add(current_url)
+                        remove_from_file(BEING_VISITED_FILE, current_url)
+                        save_set(visited, VISITED_FILE)
+                        save_to_visit(to_visit, TO_VISIT_FILE)
+                        continue  # skip further processing of this page
+
+                
                 source_title = soup.title.string.strip() if soup.title and soup.title.string else None
 
 
 
                 source_author = extract_meta_author(soup)
-
                 for link in soup.find_all("a", href=True):
                     href = link["href"].strip()
                     full_url = urljoin(current_url, href)
                     url = normalize_url(full_url)
+                    print(f"New link found : {url}")
+
+                    
+                    text = link.text.strip() or "[no text]"
+                    title = link.get("title", None)
 
                     if is_blocked_domain(url, blocked_domains) or not is_allowed_domain(url, allowed_domains):
+                        print(f"url {url} has domain blocked or not allowed")
                         continue
 
                     if  any(existing_url == url for existing_url, _ in to_visit):
+                        print(f"url {url} already in 'to_visit'!")
+                        continue
+                    if url in added_documents:
+                        print(f"url {url} already in added_documents!")
+                        continue
+                    if url in visited:
+                        print("page already visited!")
+                        continue
+                    if url == current_url:
+                        print("Page is being visited!")
                         continue
 
-                    text = link.text.strip() or "[no text]"
-                    title = link.get("title", None)
 
 
                     if is_probable_pdf(url):
                         append_pdf_info_batch(pdf_batch, url, get_file_extension(url), text, title, current_url, source_title, source_author)
+                        added_documents.add(url)
                         print(f"Probable pdf {url} added to batch. Batch length : {len(pdf_batch)}")
                         if len(pdf_batch) >= 20:
                             flush_pdf_info_batch(db_conn, pdf_batch)
-
-                    if is_probable_html(url):
+                    elif is_probable_html(url):
+                        print(f"probable html page: {url}. Appended to 'to_visit'.")
                         to_visit.append((url, str(current_depth + 1)))
       
 
@@ -383,7 +403,6 @@ def crawl():
 
                 visited.add(current_url)
                 remove_from_file(BEING_VISITED_FILE, current_url)
-
                 save_set(visited, VISITED_FILE)
                 save_to_visit(to_visit, TO_VISIT_FILE)
 
