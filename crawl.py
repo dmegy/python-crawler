@@ -21,7 +21,7 @@ TO_VISIT_FILE = os.path.join(STATE_DIR, "urls_to_visit.txt")
 ERROR_LOG_FILE = os.path.join(STATE_DIR, "errors.log")
 UNREACHABLE_DOMAINS_FILE = os.path.join(STATE_DIR, "unreachable_domains.txt")
 
-REQUEST_DELAY = 2  
+REQUEST_DELAY = 2  # secondes
 MAX_DEPTH = 3
 PDF_BATCH_SIZE = 20
 
@@ -353,8 +353,12 @@ def crawl():
         while urls_to_visit:
             now = time.time()
 
-
             current_url, current_depth = get_next_url_to_visit()
+
+            if current_url is None:
+                print("[WAITING 0.1s]")
+                time.sleep(0.1)
+                continue
 
             if current_depth > MAX_DEPTH:
                 print("[SKIP] Max depth")
