@@ -228,7 +228,12 @@ def load_to_visit(filename):
     if not os.path.exists(filename):
         return []
     with open(filename, "r") as f:
-        return [line.strip().split('|') for line in f if line.strip()]
+        return [
+            (url.strip(), int(depth.strip()))
+            for line in f if line.strip()
+            for url, depth in [line.strip().split('|', 1)]
+        ]
+
 
 def save_to_visit(lst, filename):
     tmp_filename = filename + ".tmp"
@@ -323,6 +328,22 @@ def is_eligible_for_crawl(url):
 
     return True
 
+def get_next_url_to_visit():
+    now = time.time()
+    for i, (candidate_url, candidate_depth) in enumerate(urls_to_visit):
+        sanitized_url = normalize_url(candidate_url)
+        domain = get_domain(sanitized_url)
+        elapsed = now - last_request_time[domain]
+
+        if elapsed >= REQUEST_DELAY:
+            urls_to_visit.pop(i)
+            urls_to_visit_set.discard(candidate_url)
+            return sanitized_url, int(candidate_depth)
+
+    return None, None
+
+
+
 
 def crawl():
 
@@ -331,23 +352,9 @@ def crawl():
     try:
         while urls_to_visit:
             now = time.time()
-            i = 0
-            while i < len(urls_to_visit):
-                candidate_url, candidate_depth_str = urls_to_visit[i]
-                domain = get_domain(candidate_url)
-                elapsed = now - last_request_time[domain]
-                if elapsed >= REQUEST_DELAY:
-                    break
-                i += 1
 
-            if i == len(urls_to_visit):
-                time.sleep(0.1)
-                continue
 
-            current_url, current_depth_str = urls_to_visit.pop(i)
-            urls_to_visit_set.discard(current_url)
-            current_url = normalize_url(current_url)
-            current_depth = int(current_depth_str)
+            current_url, current_depth = get_next_url_to_visit()
 
             if current_depth > MAX_DEPTH:
                 print("[SKIP] Max depth")
@@ -447,7 +454,7 @@ if __name__ == "__main__":
 
     if not urls_to_visit:
         seed = input("Enter seed URL to start crawling: ").strip()
-        urls_to_visit = [(seed, "0")]
+        urls_to_visit = [(seed, 0)]
 
     try:
         crawl()
