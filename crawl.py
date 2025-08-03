@@ -12,6 +12,7 @@ import sqlite3
 # ---- File Paths ----
 ALLOWED_CRAWL_PATTERNS_FILE = "allowed_crawl_patterns.txt"
 BLOCKED_CRAWL_PATTERNS_FILE = "blocked_crawl_patterns.txt"
+BLOCKED_CRAWL_DOMAINS_FILE = "blocked_crawl_domains.txt"
 
 STATE_DIR = "state"
 DB_PATH = os.path.join(STATE_DIR, "found_documents.db")
@@ -114,6 +115,22 @@ def normalize_url(url):
     parsed = urlparse(url)
     parsed = parsed._replace(fragment="")  # Remove #section
     return parsed.geturl()
+
+
+def convert_google_drive_share_to_download(url):
+    try:
+        parsed = urlparse(url)
+        if "drive.google.com" in parsed.netloc and "/file/d/" in parsed.path:
+            parts = parsed.path.split("/")
+            if "d" in parts:
+                file_id_index = parts.index("d") + 1
+                if file_id_index < len(parts):
+                    file_id = parts[file_id_index]
+                    return f"https://drive.usercontent.google.com/download?id={file_id}&export=download"
+        return None
+    except Exception:
+        return None
+
 
 def is_probable_pdf(url):
     #rajouter tests sur le 'text' : contient la chaîne "TD" ou "pdf", ou "download" ou "télécharge" ou ".pdf" ou autre ?
@@ -298,17 +315,21 @@ def is_url_allowed(url):
 
 def is_url_blocked(url):
     # attention utilise les variables globales.
+    # blocage de pattern et de domaines
     for pattern in blocked_crawl_patterns:
         pattern = pattern.strip().lower()
         if pattern and pattern in url:
             return True
-    return False
+
+    domain = get_domain(url).lower()
+    return domain in blocked_crawl_domains
+
 
 def is_eligible_for_crawl(url):
     # attention utilise les variables globales.
     domain = get_domain(url)
     if domain in unreachable_domains:
-        print(f"[SKIP] Domain marked as unreachable: {url}")
+        print(f"[SKIPPED] Domain marked as unreachable: {url}")
         return False
     if is_url_blocked(url):
         print(f"[BLOCKED] {url}")
@@ -317,13 +338,13 @@ def is_eligible_for_crawl(url):
         print(f"[NOT ALLOWED] {url}")
         return False
     if url in urls_already_visited:
-        print(f"[SKIP] Already visited: {url}")
+        print(f"[SKIPPED] Already visited: {url}")
         return False
     if url in urls_being_visited:
-        print(f"[SKIP] Already being visited: {url}")
+        print(f"[SKIPPED] Already being visited: {url}")
         return False
     if url in urls_to_visit_set:
-        print(f"[SKIP] Already scheduled : {url}")
+        print(f"[SKIPPED] Already scheduled : {url}")
         return False
 
     return True
@@ -370,7 +391,7 @@ def crawl():
 
             urls_being_visited.add(current_url)
             # save state ?
-            print(f"Crawling (depth {current_depth}): {current_url}")
+            print(f"- - - - - Crawling (depth {current_depth}): {current_url}")
             try:
                 res = fetch_with_throttle(current_url)
                 if res is None:
@@ -409,17 +430,19 @@ def crawl():
                         continue
 
                     if url in added_documents:
-                        print(f"url {url} already in added_documents!")
+                        print(f"Document {url} already in added to databse")
                         continue
 
                     if is_probable_pdf(url):
+                        if convert_google_drive_share_to_download(url):
+                            url = convert_google_drive_share_to_download(url)
                         append_pdf_info_batch(pdf_batch, url, get_file_extension(url), text, title, current_url, source_title)
                         added_documents.add(url)
-                        print(f"[ADDED PDF] {url}. Batch length : {len(pdf_batch)}")
+                        print(f"[ADDED] {url}. Batch length : {len(pdf_batch)}")
                         if len(pdf_batch) >= PDF_BATCH_SIZE:
                             flush_pdf_info_batch(db_conn, pdf_batch)
                     elif is_probable_html(url):
-                        print(f"[ADDED PAGE] {url}")
+                        print(f"[SCHEDULED] {url}")
                         urls_to_visit.append((url, str(current_depth + 1)))
                         urls_to_visit_set.add(url)
       
@@ -455,6 +478,7 @@ if __name__ == "__main__":
 
     allowed_crawl_patterns = load_set(ALLOWED_CRAWL_PATTERNS_FILE)
     blocked_crawl_patterns = load_set(BLOCKED_CRAWL_PATTERNS_FILE)
+    blocked_crawl_domains = load_set(BLOCKED_CRAWL_DOMAINS_FILE)
 
     if not urls_to_visit:
         seed = input("Enter seed URL to start crawling: ").strip()

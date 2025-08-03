@@ -15,7 +15,7 @@ MAX_CONTENT_LENGTH = 500 * 1024  # 500 kB
 
 ALLOWED_DOMAINS = []
 BLOCKED_DOMAINS = ["blocked.com"]
-ALLOWED_TYPES = ["application/pdf"]
+ALLOWED_TYPES = ["application/pdf","application/octet-stream"]
 BLOCKED_TYPES = ["text/html"]
 
 FILENAME_MUST_CONTAIN_ONE=[]
