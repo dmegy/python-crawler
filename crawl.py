@@ -19,7 +19,7 @@ BEING_VISITED_FILE = os.path.join(STATE_DIR, "urls_being_visited.txt")
 VISITED_FILE = os.path.join(STATE_DIR, "urls_visited.txt")
 TO_VISIT_FILE = os.path.join(STATE_DIR, "urls_to_visit.txt")
 ERROR_LOG_FILE = os.path.join(STATE_DIR, "errors.log")
-
+UNREACHABLE_DOMAINS_FILE = os.path.join(STATE_DIR, "unreachable_domains.txt")
 
 REQUEST_DELAY = 2  
 MAX_DEPTH = 3
@@ -186,6 +186,7 @@ def fetch_with_throttle(url):
     except requests.RequestException as e:
         log_error(f"Request failed for {url}: {e}")
         last_request_time[domain] = time.time()
+        unreachable_domains.add(domain)
         return None
 
 
@@ -240,6 +241,7 @@ def save_state_to_files():
     save_to_visit(urls_to_visit, TO_VISIT_FILE)
     save_set(urls_already_visited, VISITED_FILE)
     save_set(urls_being_visited, BEING_VISITED_FILE)
+    save_set(unreachable_domains,UNREACHABLE_DOMAINS_FILE)
 
 def append_pdf_info_batch(batch, pdf_url, extension, anchor_text, anchor_title, source_url, source_title):
     batch.append((
@@ -299,6 +301,10 @@ def is_url_blocked(url):
 
 def is_eligible_for_crawl(url):
     # attention utilise les variables globales.
+    domain = get_domain(url)
+    if domain in unreachable_domains:
+        print(f"[SKIP] Domain marked as unreachable: {url}")
+        return False
     if is_url_blocked(url):
         print(f"[BLOCKED] {url}")
         return False
@@ -314,6 +320,7 @@ def is_eligible_for_crawl(url):
     if url in urls_to_visit_set:
         print(f"[SKIP] Already scheduled : {url}")
         return False
+
     return True
 
 
@@ -356,7 +363,8 @@ def crawl():
             try:
                 res = fetch_with_throttle(current_url)
                 if res is None:
-                    print(f"Skipping {current_url} due to request failure.")
+                    print(f"[UNREACHEABLE] {current_url}")
+                    unreachable_domains.add(domain)
                     continue
 
                 current_url = normalize_url(res.url) # éventuel redirect http :
@@ -424,10 +432,11 @@ def crawl():
 
 if __name__ == "__main__":
     ensure_state_environment()
-
+    unreachable_domains = set()
     added_documents = set()
     pdf_batch = []
     
+    unreachable_domains = load_set(UNREACHABLE_DOMAINS_FILE)
     urls_being_visited = load_set(BEING_VISITED_FILE)
     urls_already_visited = load_set(VISITED_FILE)
     urls_to_visit = load_to_visit(TO_VISIT_FILE)
