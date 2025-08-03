@@ -10,8 +10,8 @@ import sqlite3
 
 
 # ---- File Paths ----
-ALLOWED_DOMAINS_FILE = "domains_allowed.txt"
-BLOCKED_DOMAINS_FILE = "domains_blocked.txt"
+ALLOWED_CRAWL_PATTERNS_FILE = "allowed_crawl_patterns.txt"
+BLOCKED_CRAWL_PATTERNS_FILE = "blocked_crawl_patterns.txt"
 
 STATE_DIR = "state"
 DB_PATH = os.path.join(STATE_DIR, "found_documents.db")
@@ -23,6 +23,7 @@ ERROR_LOG_FILE = os.path.join(STATE_DIR, "errors.log")
 
 REQUEST_DELAY = 2  
 MAX_DEPTH = 3
+PDF_BATCH_SIZE = 20
 
 last_request_time = defaultdict(float)
 
@@ -84,6 +85,30 @@ def extract_meta_author(soup):
     if author_tag and author_tag.get("content"):
         return author_tag["content"].strip()
     return None
+
+def get_meta_refresh_redirect_url(soup, current_url):
+    if soup is None:
+        return None
+
+    meta = soup.find("meta", attrs={"http-equiv": lambda x: x and x.lower() == "refresh"})
+    if not meta:
+        return None
+
+    content = meta.get("content", "")
+    if not isinstance(content, str):
+        return None
+
+    parts = content.lower().split(";")
+    for part in parts:
+        part = part.strip()
+        if part.startswith("url="):
+            raw_url = part[4:].strip().strip('\'"')
+            if raw_url:
+                return urljoin(current_url, raw_url)
+
+    return None
+
+
 
 def normalize_url(url):
     parsed = urlparse(url)
@@ -204,7 +229,6 @@ def load_to_visit(filename):
     with open(filename, "r") as f:
         return [line.strip().split('|') for line in f if line.strip()]
 
-
 def save_to_visit(lst, filename):
     tmp_filename = filename + ".tmp"
     with open(tmp_filename, "w", encoding="utf-8") as f:
@@ -212,7 +236,12 @@ def save_to_visit(lst, filename):
             f.write(f"{url}|{depth}\n")
     os.replace(tmp_filename, filename)
 
-def append_pdf_info_batch(batch, pdf_url, extension, anchor_text, anchor_title, source_url, source_title, source_author):
+def save_state_to_files():
+    save_to_visit(urls_to_visit, TO_VISIT_FILE)
+    save_set(urls_already_visited, VISITED_FILE)
+    save_set(urls_being_visited, BEING_VISITED_FILE)
+
+def append_pdf_info_batch(batch, pdf_url, extension, anchor_text, anchor_title, source_url, source_title):
     batch.append((
         pdf_url,
         extension,
@@ -252,78 +281,77 @@ def get_domain(url):
         return ""
 
 
-def is_allowed_domain(url, allowed_domains):
+def is_url_allowed(url):
+    # attention utilise les variables globales.
     # si la liste allowed domaines est vide, on autorise
-    if len(allowed_domains) == 0:
+    # pas ultra sécurisé
+    if len(allowed_crawl_patterns) == 0:
         return True
-    domain = get_domain(url)
-    return any(
-        domain == allowed or domain.endswith('.' + allowed) or domain.endswith(allowed)
-        for allowed in allowed_domains
-    )
+    return any(pattern.strip().lower() in url for pattern in allowed_crawl_patterns)
 
-def is_blocked_domain(url, blocked_domains):
-    domain = get_domain(url)
-    return any(
-        domain == blocked or domain.endswith('.' + blocked) or domain.endswith(blocked)
-        for blocked in blocked_domains
-    )
+def is_url_blocked(url):
+    # attention utilise les variables globales.
+    for pattern in blocked_crawl_patterns:
+        pattern = pattern.strip().lower()
+        if pattern and pattern in url:
+            return True
+    return False
+
+def is_eligible_for_crawl(url):
+    # attention utilise les variables globales.
+    if is_url_blocked(url):
+        print(f"[BLOCKED] {url}")
+        return False
+    if not is_url_allowed(url):
+        print(f"[NOT ALLOWED] {url}")
+        return False
+    if url in urls_already_visited:
+        print(f"[SKIP] Already visited: {url}")
+        return False
+    if url in urls_being_visited:
+        print(f"[SKIP] Already being visited: {url}")
+        return False
+    if url in urls_to_visit_set:
+        print(f"[SKIP] Already scheduled : {url}")
+        return False
+    return True
 
 
 def crawl():
-    added_documents = set()
-    pdf_batch = []
-    visited = load_set(VISITED_FILE)
-    to_visit = load_to_visit(TO_VISIT_FILE)
-    allowed_domains = load_set(ALLOWED_DOMAINS_FILE)
-    blocked_domains = load_set(BLOCKED_DOMAINS_FILE)
-
-    if not to_visit:
-        seed = input("Enter seed URL to start crawling: ").strip()
-        to_visit = [(seed, "0")]
 
     db_conn = init_db()
 
     try:
-        while to_visit:
+        while urls_to_visit:
             now = time.time()
             i = 0
-            while i < len(to_visit):
-                candidate_url, candidate_depth_str = to_visit[i]
+            while i < len(urls_to_visit):
+                candidate_url, candidate_depth_str = urls_to_visit[i]
                 domain = get_domain(candidate_url)
                 elapsed = now - last_request_time[domain]
                 if elapsed >= REQUEST_DELAY:
                     break
                 i += 1
 
-            if i == len(to_visit):
+            if i == len(urls_to_visit):
                 time.sleep(0.1)
                 continue
 
-            current_url, current_depth_str = to_visit.pop(i)
+            current_url, current_depth_str = urls_to_visit.pop(i)
+            urls_to_visit_set.discard(current_url)
             current_url = normalize_url(current_url)
             current_depth = int(current_depth_str)
 
-            if current_url in visited or current_depth > MAX_DEPTH:
-                save_to_visit(to_visit, TO_VISIT_FILE)
-                print("skip: already in visited or max depth")
+            if current_depth > MAX_DEPTH:
+                print("[SKIP] Max depth")
                 continue
 
-            if is_blocked_domain(current_url, blocked_domains):
-                print(f"Skipping {current_url} (domain blocked)")
-                save_to_visit(to_visit, TO_VISIT_FILE)
+            if not is_eligible_for_crawl(current_url):
                 continue
 
-            if not is_allowed_domain(current_url, allowed_domains):
-                print(f"Skipping {current_url} (not in allowed domains)")
-                save_to_visit(to_visit, TO_VISIT_FILE)
-                continue
 
-            add_to_file(BEING_VISITED_FILE, current_url)
-            save_to_visit(to_visit, TO_VISIT_FILE)
-
-
-
+            urls_being_visited.add(current_url)
+            # save state ?
             print(f"Crawling (depth {current_depth}): {current_url}")
             try:
                 res = fetch_with_throttle(current_url)
@@ -331,91 +359,87 @@ def crawl():
                     print(f"Skipping {current_url} due to request failure.")
                     continue
 
-                current_url = normalize_url(res.url)
-                if current_url in visited:
-                    print(f"url {current_url} already visited")
+                current_url = normalize_url(res.url) # éventuel redirect http :
+                if not is_eligible_for_crawl(current_url):
                     continue
 
                 soup = BeautifulSoup(res.text, "html.parser")
 
-                # Detect meta-refresh redirects
-                meta_refresh = soup.find('meta', attrs={'http-equiv': 'refresh'})
-                if meta_refresh:
-                    content = meta_refresh.get('content', '')
-                    if 'url=' in content.lower():
-                        redirect_url = content.lower().split('url=')[-1].strip()
-                        full_redirect_url = urljoin(current_url, redirect_url)
-                        print(f"Meta-refresh redirect found: {full_redirect_url}")
-                        to_visit.append((normalize_url(full_redirect_url), str(current_depth)))
-                        visited.add(current_url)
-                        remove_from_file(BEING_VISITED_FILE, current_url)
-                        save_set(visited, VISITED_FILE)
-                        save_to_visit(to_visit, TO_VISIT_FILE)
-                        continue  # skip further processing of this page
+                redirect_url = get_meta_refresh_redirect_url(soup, current_url)
+                if redirect_url:
+                    if is_eligible_for_crawl(redirect_url):
+                        print(f"[FOLLOW] {redirect_url}")
+                        urls_to_visit.append((normalize_url(redirect_url), str(current_depth)))
+                        urls_to_visit_set.add(normalize_url(redirect_url))
+                        urls_already_visited.add(current_url)
+                        urls_being_visited.discard(current_url)
+                    continue  # skip 
 
                 
                 source_title = soup.title.string.strip() if soup.title and soup.title.string else None
 
-
-
-                source_author = extract_meta_author(soup)
                 for link in soup.find_all("a", href=True):
                     href = link["href"].strip()
                     full_url = urljoin(current_url, href)
                     url = normalize_url(full_url)
-                    print(f"New link found : {url}")
-
                     
                     text = link.text.strip() or "[no text]"
                     title = link.get("title", None)
 
-                    if is_blocked_domain(url, blocked_domains) or not is_allowed_domain(url, allowed_domains):
-                        print(f"url {url} has domain blocked or not allowed")
+                    if not is_eligible_for_crawl(url):
                         continue
 
-                    if  any(existing_url == url for existing_url, _ in to_visit):
-                        print(f"url {url} already in 'to_visit'!")
-                        continue
                     if url in added_documents:
                         print(f"url {url} already in added_documents!")
                         continue
-                    if url in visited:
-                        print("page already visited!")
-                        continue
-                    if url == current_url:
-                        print("Page is being visited!")
-                        continue
-
-
 
                     if is_probable_pdf(url):
-                        append_pdf_info_batch(pdf_batch, url, get_file_extension(url), text, title, current_url, source_title, source_author)
+                        append_pdf_info_batch(pdf_batch, url, get_file_extension(url), text, title, current_url, source_title)
                         added_documents.add(url)
-                        print(f"Probable pdf {url} added to batch. Batch length : {len(pdf_batch)}")
-                        if len(pdf_batch) >= 20:
+                        print(f"[ADDED PDF] {url}. Batch length : {len(pdf_batch)}")
+                        if len(pdf_batch) >= PDF_BATCH_SIZE:
                             flush_pdf_info_batch(db_conn, pdf_batch)
                     elif is_probable_html(url):
-                        print(f"probable html page: {url}. Appended to 'to_visit'.")
-                        to_visit.append((url, str(current_depth + 1)))
+                        print(f"[ADDED PAGE] {url}")
+                        urls_to_visit.append((url, str(current_depth + 1)))
+                        urls_to_visit_set.add(url)
       
 
-                flush_pdf_info_batch(db_conn, pdf_batch) #à la fin de chaque page
 
-                visited.add(current_url)
-                remove_from_file(BEING_VISITED_FILE, current_url)
-                save_set(visited, VISITED_FILE)
-                save_to_visit(to_visit, TO_VISIT_FILE)
 
             except Exception as e:
                 log_error(f"Error visiting {current_url}: {e}")
+            finally:
+                flush_pdf_info_batch(db_conn, pdf_batch) #à la fin de chaque page
+                urls_already_visited.add(current_url)
+                urls_being_visited.discard(current_url)
+                save_state_to_files()
+
     finally:
         # par exemple en cas d'interruption au clavier
         flush_pdf_info_batch(db_conn, pdf_batch)
         db_conn.close()
+        save_state_to_files()
 
 
 if __name__ == "__main__":
     ensure_state_environment()
+
+    added_documents = set()
+    pdf_batch = []
+    
+    urls_being_visited = load_set(BEING_VISITED_FILE)
+    urls_already_visited = load_set(VISITED_FILE)
+    urls_to_visit = load_to_visit(TO_VISIT_FILE)
+    urls_to_visit_set = set(url for url, _ in urls_to_visit)
+
+    allowed_crawl_patterns = load_set(ALLOWED_CRAWL_PATTERNS_FILE)
+    blocked_crawl_patterns = load_set(BLOCKED_CRAWL_PATTERNS_FILE)
+
+    if not urls_to_visit:
+        seed = input("Enter seed URL to start crawling: ").strip()
+        urls_to_visit = [(seed, "0")]
+
     try:
         crawl()
     except KeyboardInterrupt:

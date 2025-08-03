@@ -21,7 +21,7 @@ BLOCKED_TYPES = ["text/html"]
 FILENAME_MUST_CONTAIN_ONE=[]
 FILENAME_MUST_NOT_CONTAIN = [".exe", ".command"] # :-D
 
-conditions = ["doc_date_downloaded IS NULL","link_http_code IS NOT NULL"]
+conditions = ["doc_date_downloaded IS NULL","link_http_code IS NOT NULL"]#uniquement fichiers vérifiés
 params = []
 
 if ALLOWED_TYPES:
